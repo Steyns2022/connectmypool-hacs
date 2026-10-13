@@ -19,12 +19,15 @@ from .const import (
     CONF_WAIT_FOR_EXECUTION,
     CONF_EXPOSE_CHANNEL_SWITCHES,
     CONF_EXPOSE_SETPOINT_NUMBERS,
+    CONF_FILTER_PUMP_SPEEDS,
     DEFAULT_BASE_URL,
     DEFAULT_TEMPERATURE_SCALE,
     DEFAULT_SCAN_INTERVAL,
     DEFAULT_WAIT_FOR_EXECUTION,
     DEFAULT_EXPOSE_CHANNEL_SWITCHES,
     DEFAULT_EXPOSE_SETPOINT_NUMBERS,
+    DEFAULT_FILTER_PUMP_SPEEDS,
+    FILTER_PUMP_SPEED_OPTIONS,
 )
 
 
@@ -37,6 +40,9 @@ STEP_USER_DATA_SCHEMA = vol.Schema(
         vol.Required(CONF_POOL_API_CODE): str,
         vol.Optional(CONF_BASE_URL, default=DEFAULT_BASE_URL): str,
         vol.Optional(CONF_TEMPERATURE_SCALE, default=DEFAULT_TEMPERATURE_SCALE): vol.In([0, 1]),
+        vol.Optional(CONF_FILTER_PUMP_SPEEDS, default=DEFAULT_FILTER_PUMP_SPEEDS): vol.In(
+            FILTER_PUMP_SPEED_OPTIONS
+        ),
     }
 )
 
@@ -50,6 +56,7 @@ class ConnectMyPoolConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             pool_api_code = user_input[CONF_POOL_API_CODE].strip()
             base_url = user_input.get(CONF_BASE_URL, DEFAULT_BASE_URL).strip()
             temperature_scale = int(user_input.get(CONF_TEMPERATURE_SCALE, DEFAULT_TEMPERATURE_SCALE))
+            filter_pump_speeds = user_input.get(CONF_FILTER_PUMP_SPEEDS, DEFAULT_FILTER_PUMP_SPEEDS)
 
             session = async_get_clientsession(self.hass)
             api = ConnectMyPoolApi(session, base_url=base_url)
@@ -72,6 +79,7 @@ class ConnectMyPoolConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         CONF_POOL_API_CODE: pool_api_code,
                         CONF_BASE_URL: base_url,
                         CONF_TEMPERATURE_SCALE: temperature_scale,
+                        CONF_FILTER_PUMP_SPEEDS: filter_pump_speeds,
                     },
                 )
 
@@ -82,12 +90,12 @@ class ConnectMyPoolConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     @staticmethod
     def async_get_options_flow(config_entry: config_entries.ConfigEntry) -> config_entries.OptionsFlow:
-        return ConnectMyPoolOptionsFlow(config_entry)
+        return ConnectMyPoolOptionsFlow()
 
 
 class ConnectMyPoolOptionsFlow(config_entries.OptionsFlow):
-    def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
-        self.config_entry = config_entry
+    # Home Assistant provides self.config_entry (2024.11+); assigning it in
+    # __init__ is no longer allowed and breaks the Configure dialog.
 
     async def async_step_init(self, user_input=None) -> FlowResult:
         if user_input is not None:
@@ -113,6 +121,13 @@ class ConnectMyPoolOptionsFlow(config_entries.OptionsFlow):
                         CONF_EXPOSE_SETPOINT_NUMBERS,
                         default=self.config_entry.options.get(CONF_EXPOSE_SETPOINT_NUMBERS, DEFAULT_EXPOSE_SETPOINT_NUMBERS),
                     ): bool,
+                    vol.Optional(
+                        CONF_FILTER_PUMP_SPEEDS,
+                        default=self.config_entry.options.get(
+                            CONF_FILTER_PUMP_SPEEDS,
+                            self.config_entry.data.get(CONF_FILTER_PUMP_SPEEDS, DEFAULT_FILTER_PUMP_SPEEDS),
+                        ),
+                    ): vol.In(FILTER_PUMP_SPEED_OPTIONS),
                     vol.Optional(
                         CONF_TEMPERATURE_SCALE,
                         default=self.config_entry.options.get(

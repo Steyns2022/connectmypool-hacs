@@ -22,10 +22,12 @@ from .const import (
     ACTION_SET_ACTIVE_FAVOURITE,
     ACTION_SET_SOLAR_MODE,
     ACTION_SET_HEAT_COOL,
+    CONF_FILTER_PUMP_SPEEDS,
+    DEFAULT_FILTER_PUMP_SPEEDS,
 )
 from .cycle import (
-    FILTER_PUMP_CYCLE,
     SIMPLE_CHANNEL_CYCLE,
+    filter_pump_cycle,
     CycleError,
     cycle_steps,
 )
@@ -75,6 +77,12 @@ async def async_setup_entry(hass, entry, async_add_entities):
     api: ConnectMyPoolApi = data["api"]
     cfg: dict[str, Any] = data["config"]
     wait_for_execution: bool = data.get("wait_for_execution", True)
+    pump_cycle = filter_pump_cycle(
+        entry.options.get(
+            CONF_FILTER_PUMP_SPEEDS,
+            entry.data.get(CONF_FILTER_PUMP_SPEEDS, DEFAULT_FILTER_PUMP_SPEEDS),
+        )
+    )
 
     entities: list[SelectEntity] = []
 
@@ -90,14 +98,15 @@ async def async_setup_entry(hass, entry, async_add_entities):
         entities.append(ActiveFavouriteSelect(coordinator, api, wait_for_execution, favs))
 
     # Every channel is a multi-state device controlled by a cycle action, not a
-    # true on/off switch.  The filter pump cycles Off/Auto/Medium/High; all
+    # true on/off switch.  The filter pump's cycle depends on the pump fitted
+    # (single/two/three-speed, set by the filter_pump_speeds option); all
     # other channels (jets, blower, heater pump, ...) cycle Off/Auto/On.  The
     # heater-pump channel is disabled by default so it is not an accidental
     # one-tap control (it energises heating circulation).
     for ch in (cfg.get("channels") or []):
         if _is_filter_pump_channel(ch):
             entities.append(
-                ChannelModeSelect(coordinator, api, wait_for_execution, ch, FILTER_PUMP_CYCLE)
+                ChannelModeSelect(coordinator, api, wait_for_execution, ch, pump_cycle)
             )
         else:
             enabled = not _is_heater_pump_channel(ch)

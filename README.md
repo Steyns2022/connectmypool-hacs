@@ -8,8 +8,11 @@ It talks to the official ConnectMyPool cloud endpoints documented in the *Home A
 
 - **Pool water temperature** sensor
 - **Channel controls**
-  - Multi-speed **filter pump** as a proper mode selector
-  - For the Viron two-speed setup: **Off / Auto / Medium Speed / High Speed**
+  - **Filter pump** as a proper mode selector, matched to the pump fitted
+    (*Filter pump type* setting):
+    - single-speed: **Off / Auto / On**
+    - two-speed (default, Viron): **Off / Auto / Medium Speed / High Speed**
+    - three-speed: **Off / Auto / Low / Medium / High Speed**
   - Other simple channels (for example Spa Jets, Spa Blower and Heater Pump) as **On/Off switches**
   - ConnectMyPool only exposes a channel-cycle command, so the integration reads the current mode, sends only the required cycles, and verifies the reported state after each command
 - **Valve mode** selects (Off/Auto/On)
@@ -40,6 +43,8 @@ This integration is designed around that: default scan interval is 60s, and it u
 
 In **Settings → Devices & Services → ConnectMyPool → Configure**:
 
+- Filter pump type: single / two / three speed (also asked during setup).
+  It must match your pump's real cycle, or mode changes are refused.
 - Scan interval (60–3600 seconds)
 - Wait for execution (recommended ON; avoids UI “flip-flop”)
 - Expose channel switches (for non-filter ON/OFF channels)

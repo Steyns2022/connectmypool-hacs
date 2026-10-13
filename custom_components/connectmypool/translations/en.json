@@ -7,7 +7,8 @@
         "data": {
           "pool_api_code": "Pool API Code",
           "base_url": "Base URL",
-          "temperature_scale": "Temperature scale (0 = \u00b0C, 1 = \u00b0F)"
+          "temperature_scale": "Temperature scale (0 = \u00b0C, 1 = \u00b0F)",
+          "filter_pump_speeds": "Filter pump type (single / two / three speed)"
         }
       }
     },
@@ -28,7 +29,8 @@
           "expose_channel_switches": "Expose channel ON/OFF switches",
           "expose_setpoint_numbers": "Expose legacy setpoint numbers (diagnostic)",
           "temperature_scale": "Temperature scale (0 = \u00b0C, 1 = \u00b0F)",
-          "base_url": "Base URL"
+          "base_url": "Base URL",
+          "filter_pump_speeds": "Filter pump type (single / two / three speed)"
         }
       }
     }

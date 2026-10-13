@@ -18,9 +18,11 @@ sys.path.insert(
 
 from cycle import (  # noqa: E402
     FILTER_PUMP_CYCLE,
+    FILTER_PUMP_CYCLES,
     SIMPLE_CHANNEL_CYCLE,
     CycleError,
     cycle_steps,
+    filter_pump_cycle,
     next_in_cycle,
 )
 
@@ -102,3 +104,59 @@ def test_unknown_mode_raises():
         cycle_steps(0, 99, SIMPLE_CHANNEL_CYCLE)
     with pytest.raises(CycleError):
         next_in_cycle(3, SIMPLE_CHANNEL_CYCLE)  # 3 is not a simple-channel mode
+
+
+# Filter pump type option: single / two / three speed.
+
+
+@pytest.mark.parametrize(
+    "speeds,expected",
+    [
+        ("single", (0, 1, 2)),
+        ("two", (0, 1, 4, 5)),
+        ("three", (0, 1, 3, 4, 5)),
+        (None, (0, 1, 4, 5)),  # missing option keeps the old two-speed default
+        ("bogus", (0, 1, 4, 5)),
+    ],
+)
+def test_filter_pump_cycle_option(speeds, expected):
+    assert filter_pump_cycle(speeds) == expected
+
+
+@pytest.mark.parametrize(
+    "current,desired,expected",
+    [
+        (1, 2, 1),  # Auto -> On
+        (2, 0, 1),  # On -> Off
+        (0, 1, 1),  # Off -> Auto
+        (1, 0, 2),  # Auto -> Off (passes through On)
+        (2, 1, 2),  # On -> Auto (passes through Off)
+    ],
+)
+def test_single_speed_filter_steps(current, desired, expected):
+    assert cycle_steps(current, desired, filter_pump_cycle("single")) == expected
+
+
+def test_single_speed_pump_on_is_not_rejected():
+    # A single-speed pump reports On (2), which the two-speed cycle rejects.
+    with pytest.raises(CycleError):
+        cycle_steps(2, 0, FILTER_PUMP_CYCLE)
+    assert cycle_steps(2, 0, filter_pump_cycle("single")) == 1
+
+
+@pytest.mark.parametrize(
+    "current,desired,expected",
+    [(1, 3, 1), (3, 5, 2), (5, 0, 1), (1, 0, 4)],
+)
+def test_three_speed_filter_steps(current, desired, expected):
+    assert cycle_steps(current, desired, filter_pump_cycle("three")) == expected
+
+
+def test_every_pump_type_walks_to_every_target():
+    for cyc in FILTER_PUMP_CYCLES.values():
+        for start in cyc:
+            for target in cyc:
+                mode = start
+                for _ in range(cycle_steps(start, target, cyc)):
+                    mode = next_in_cycle(mode, cyc)
+                assert mode == target

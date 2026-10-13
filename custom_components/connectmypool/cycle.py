@@ -10,6 +10,13 @@ Sequences (per the ConnectMyPool integration guide and live Viron Connect 10):
 
     Filter pump:  Off -> Auto -> Medium -> High -> Off   (modes 0, 1, 4, 5)
     Other channels: Off -> Auto -> On -> Off             (modes 0, 1, 2)
+
+The filter pump's sequence depends on the pump fitted, so it is chosen by the
+``filter_pump_speeds`` option (see ``FILTER_PUMP_CYCLES``):
+
+    single: Off -> Auto -> On                    (modes 0, 1, 2)
+    two:    Off -> Auto -> Medium -> High        (modes 0, 1, 4, 5)
+    three:  Off -> Auto -> Low -> Medium -> High (modes 0, 1, 3, 4, 5)
 """
 
 from __future__ import annotations
@@ -19,6 +26,21 @@ from typing import Sequence
 # Firmware cycle orders, keyed by the ConnectMyPool mode integers in const.CHANNEL_MODES.
 FILTER_PUMP_CYCLE: tuple[int, ...] = (0, 1, 4, 5)   # Off -> Auto -> Medium -> High
 SIMPLE_CHANNEL_CYCLE: tuple[int, ...] = (0, 1, 2)   # Off -> Auto -> On
+
+FILTER_PUMP_CYCLES: dict[str, tuple[int, ...]] = {
+    "single": (0, 1, 2),        # Off -> Auto -> On
+    "two": FILTER_PUMP_CYCLE,   # Off -> Auto -> Medium -> High
+    "three": (0, 1, 3, 4, 5),   # Off -> Auto -> Low -> Medium -> High
+}
+
+
+def filter_pump_cycle(speeds: str | None) -> tuple[int, ...]:
+    """Return the filter pump cycle for a ``filter_pump_speeds`` option value.
+
+    Unknown or missing values fall back to the two-speed cycle, which was the
+    only behaviour before the option existed.
+    """
+    return FILTER_PUMP_CYCLES.get(speeds or "two", FILTER_PUMP_CYCLE)
 
 
 class CycleError(ValueError):

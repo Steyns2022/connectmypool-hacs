@@ -10,6 +10,7 @@ CONF_SCAN_INTERVAL = "scan_interval"
 CONF_WAIT_FOR_EXECUTION = "wait_for_execution"
 CONF_EXPOSE_CHANNEL_SWITCHES = "expose_channel_switches"
 CONF_EXPOSE_SETPOINT_NUMBERS = "expose_setpoint_numbers"
+CONF_FILTER_PUMP_SPEEDS = "filter_pump_speeds"
 
 # Defaults
 DEFAULT_BASE_URL = "https://www.connectmypool.com.au"
@@ -18,6 +19,8 @@ DEFAULT_SCAN_INTERVAL = 60     # seconds (ConnectMyPool cloud throttles config/s
 DEFAULT_WAIT_FOR_EXECUTION = True  # waiting avoids "optimistic" UI flips
 DEFAULT_EXPOSE_CHANNEL_SWITCHES = True
 DEFAULT_EXPOSE_SETPOINT_NUMBERS = False
+FILTER_PUMP_SPEED_OPTIONS = ["single", "two", "three"]
+DEFAULT_FILTER_PUMP_SPEEDS = "two"  # pre-option behaviour (Viron two-speed)
 
 # Platforms
 PLATFORMS: list[str] = [

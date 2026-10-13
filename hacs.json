@@ -1,6 +1,6 @@
 {
-  "homeassistant": "2024.6.0",
+  "homeassistant": "2024.11.0",
   "name": "ConnectMyPool",
   "render_readme": true,
-  "version": "1.0.7"
+  "version": "1.0.8"
 }
