@@ -211,7 +211,11 @@ class ConnectMyPoolHeaterClimate(ConnectMyPoolEntity, ClimateEntity):
         await self._do_action(ACTION_SET_POOL_SPA, value=str(desired))
 
     async def _prepare_spa_for_heating(self) -> None:
-        """Spa mode, then spa jets On, then settle, before the heater starts."""
+        """Spa mode, then spa jets On, then settle, before the heater starts.
+
+        The heater needs water flowing through it (spa jets running) before it
+        can fire, hence the settle delay and the final flow check.
+        """
         await self.coordinator.async_refresh()
         changed = False
 
@@ -238,11 +242,16 @@ class ConnectMyPoolHeaterClimate(ConnectMyPoolEntity, ClimateEntity):
         if changed:
             await asyncio.sleep(SPA_HEAT_SETTLE_SECONDS)
 
-        # Safety: never start the heater unless the controller reports Spa.
+        # Safety: the heater only fires with water flowing through it, so never
+        # start it unless the controller reports Spa mode and spa jets On.
         await self.coordinator.async_refresh()
         if self._pool_or_spa() != 0:
             raise HomeAssistantError(
                 "Pool/Spa still reports Pool; heater not started. Try again in a minute."
+            )
+        if self._spa_jets_channel is not None and self._spa_jets_mode() != 2:
+            raise HomeAssistantError(
+                "Spa jets don't report On (no flow through the heater); heater not started."
             )
 
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
