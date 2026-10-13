@@ -20,6 +20,7 @@ from .const import (
     CONF_EXPOSE_CHANNEL_SWITCHES,
     CONF_EXPOSE_SETPOINT_NUMBERS,
     CONF_FILTER_PUMP_SPEEDS,
+    CONF_HEAT_SPA_ONLY,
     DEFAULT_BASE_URL,
     DEFAULT_TEMPERATURE_SCALE,
     DEFAULT_SCAN_INTERVAL,
@@ -27,6 +28,7 @@ from .const import (
     DEFAULT_EXPOSE_CHANNEL_SWITCHES,
     DEFAULT_EXPOSE_SETPOINT_NUMBERS,
     DEFAULT_FILTER_PUMP_SPEEDS,
+    DEFAULT_HEAT_SPA_ONLY,
     FILTER_PUMP_SPEED_OPTIONS,
 )
 
@@ -120,6 +122,13 @@ class ConnectMyPoolOptionsFlow(config_entries.OptionsFlow):
                     vol.Optional(
                         CONF_EXPOSE_SETPOINT_NUMBERS,
                         default=self.config_entry.options.get(CONF_EXPOSE_SETPOINT_NUMBERS, DEFAULT_EXPOSE_SETPOINT_NUMBERS),
+                    ): bool,
+                    vol.Optional(
+                        CONF_HEAT_SPA_ONLY,
+                        default=self.config_entry.options.get(
+                            CONF_HEAT_SPA_ONLY,
+                            self.config_entry.data.get(CONF_HEAT_SPA_ONLY, DEFAULT_HEAT_SPA_ONLY),
+                        ),
                     ): bool,
                     vol.Optional(
                         CONF_FILTER_PUMP_SPEEDS,

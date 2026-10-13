@@ -6,6 +6,7 @@ from typing import Any, Optional
 from homeassistant.components.climate import ClimateEntity, HVACMode, ClimateEntityFeature
 from homeassistant.const import UnitOfTemperature
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import entity_registry as er
 
 from .api import ConnectMyPoolApi, ConnectMyPoolError
 from .const import (
@@ -13,9 +14,14 @@ from .const import (
     ACTION_SET_HEATER_MODE,
     ACTION_SET_HEATER_SET_TEMP,
     ACTION_SET_HEAT_COOL,
+    ACTION_SET_POOL_SPA,
+    CONF_HEAT_SPA_ONLY,
+    DEFAULT_HEAT_SPA_ONLY,
     HEATER_MODES,
     HEAT_COOL,
     POOL_SPA,
+    SPA_HEAT_SETTLE_SECONDS,
+    SPA_JETS_FUNCTION,
 )
 from .entity import ConnectMyPoolEntity
 
@@ -26,10 +32,15 @@ async def async_setup_entry(hass, entry, async_add_entities):
     api: ConnectMyPoolApi = data["api"]
     cfg: dict[str, Any] = data["config"]
     wait_for_execution: bool = data.get("wait_for_execution", True)
+    heat_spa_only = bool(
+        entry.options.get(CONF_HEAT_SPA_ONLY, entry.data.get(CONF_HEAT_SPA_ONLY, DEFAULT_HEAT_SPA_ONLY))
+    )
 
     entities: list[ClimateEntity] = []
     for h in (cfg.get("heaters") or []):
-        entities.append(ConnectMyPoolHeaterClimate(coordinator, api, wait_for_execution, cfg, h))
+        entities.append(
+            ConnectMyPoolHeaterClimate(coordinator, api, wait_for_execution, cfg, h, heat_spa_only)
+        )
     async_add_entities(entities)
 
 
@@ -44,6 +55,7 @@ class ConnectMyPoolHeaterClimate(ConnectMyPoolEntity, ClimateEntity):
         wait_for_execution: bool,
         cfg: dict[str, Any],
         heater_cfg: dict[str, Any],
+        heat_spa_only: bool = False,
     ) -> None:
         self._api = api
         self._wait = bool(wait_for_execution)
@@ -55,6 +67,24 @@ class ConnectMyPoolHeaterClimate(ConnectMyPoolEntity, ClimateEntity):
         self._heat_cool_enabled = bool(cfg.get("heat_cool_selection_enabled"))
         if self._heat_cool_enabled and HVACMode.COOL not in self._attr_hvac_modes:
             self._attr_hvac_modes = [HVACMode.OFF, HVACMode.HEAT, HVACMode.COOL]
+
+        # Combined pool + spa: expose Spa/Pool as presets so the heater card can
+        # pick the body of water it heats.  With heat_spa_only, heating always
+        # runs in Spa mode and the pool is never heated.
+        self._pool_spa_enabled = bool(cfg.get("pool_spa_selection_enabled"))
+        self._heat_spa_only = bool(heat_spa_only) and self._pool_spa_enabled
+        if self._pool_spa_enabled:
+            self._attr_supported_features |= ClimateEntityFeature.PRESET_MODE
+            self._attr_preset_modes = [POOL_SPA[0], POOL_SPA[1]]  # Spa, Pool
+        self._spa_jets_channel: int | None = None
+        for ch in (cfg.get("channels") or []):
+            try:
+                if int(ch.get("function")) == SPA_JETS_FUNCTION:
+                    self._spa_jets_channel = int(ch["channel_number"])
+                    break
+            except (TypeError, ValueError, KeyError):
+                continue
+        self._heat_lock = asyncio.Lock()
 
     def _unit(self) -> str:
         return UnitOfTemperature.CELSIUS if int(self.coordinator.temperature_scale) == 0 else UnitOfTemperature.FAHRENHEIT
@@ -145,9 +175,87 @@ class ConnectMyPoolHeaterClimate(ConnectMyPoolEntity, ClimateEntity):
         except ConnectMyPoolError as err:
             raise HomeAssistantError(str(err)) from err
 
+    @property
+    def preset_mode(self) -> str | None:
+        if not self._pool_spa_enabled:
+            return None
+        val = self.data.get("pool_spa_selection")
+        try:
+            return POOL_SPA.get(int(val))
+        except (TypeError, ValueError):
+            return None
+
+    def _heater_on(self) -> bool:
+        h = self._find_heater() or {}
+        try:
+            return int(h.get("mode")) == 1
+        except (TypeError, ValueError):
+            return False
+
+    def _spa_jets_mode(self) -> int | None:
+        for c in (self.data.get("channels") or []):
+            try:
+                if int(c.get("channel_number")) == self._spa_jets_channel:
+                    return int(c.get("mode"))
+            except (TypeError, ValueError):
+                return None
+        return None
+
+    async def async_set_preset_mode(self, preset_mode: str) -> None:
+        desired = next((k for k, v in POOL_SPA.items() if v == preset_mode), None)
+        if desired is None or not self._pool_spa_enabled:
+            raise HomeAssistantError(f"Unsupported preset: {preset_mode}")
+        if desired == 1 and self._heat_spa_only and self._heater_on():
+            # Never leave the heater running into Pool mode.
+            await self._do_action(ACTION_SET_HEATER_MODE, value="0")
+        await self._do_action(ACTION_SET_POOL_SPA, value=str(desired))
+
+    async def _prepare_spa_for_heating(self) -> None:
+        """Spa mode, then spa jets On, then settle, before the heater starts."""
+        await self.coordinator.async_refresh()
+        changed = False
+
+        if self._pool_or_spa() != 0:
+            await self._do_action(ACTION_SET_POOL_SPA, value="0")
+            changed = True
+
+        if self._spa_jets_channel is not None and self._spa_jets_mode() != 2:
+            # Use the jets' own select so its paced, verified cycling is reused.
+            ent_reg = er.async_get(self.hass)
+            jets_entity = ent_reg.async_get_entity_id(
+                "select", DOMAIN, f"{self._pool_id}_channel_{self._spa_jets_channel}_mode"
+            )
+            if jets_entity is None:
+                raise HomeAssistantError("Spa jets control not found; heater not started.")
+            await self.hass.services.async_call(
+                "select",
+                "select_option",
+                {"entity_id": jets_entity, "option": "On"},
+                blocking=True,
+            )
+            changed = True
+
+        if changed:
+            await asyncio.sleep(SPA_HEAT_SETTLE_SECONDS)
+
+        # Safety: never start the heater unless the controller reports Spa.
+        await self.coordinator.async_refresh()
+        if self._pool_or_spa() != 0:
+            raise HomeAssistantError(
+                "Pool/Spa still reports Pool; heater not started. Try again in a minute."
+            )
+
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
         if hvac_mode == HVACMode.OFF:
             await self._do_action(ACTION_SET_HEATER_MODE, value="0")
+            return
+
+        if self._heat_spa_only and hvac_mode in (HVACMode.HEAT, HVACMode.COOL):
+            async with self._heat_lock:
+                await self._prepare_spa_for_heating()
+                if self._heat_cool_enabled:
+                    await self._do_action(ACTION_SET_HEAT_COOL, value="1" if hvac_mode == HVACMode.HEAT else "0")
+                await self._do_action(ACTION_SET_HEATER_MODE, value="1")
             return
 
         if hvac_mode == HVACMode.HEAT:
@@ -182,6 +290,7 @@ class ConnectMyPoolHeaterClimate(ConnectMyPoolEntity, ClimateEntity):
     def extra_state_attributes(self) -> dict[str, Any]:
         return {
             "heater_number": self._heater_number,
+            "heat_spa_only": self._heat_spa_only,
             "heater_mode_raw": None if self._find_heater() is None else self._find_heater().get("mode"),
             "pool_spa_selection": POOL_SPA.get(self._pool_or_spa(), str(self._pool_or_spa())),
             "heat_cool_selection": HEAT_COOL.get(int(self.data.get("heat_cool_selection", 1)), str(self.data.get("heat_cool_selection"))),

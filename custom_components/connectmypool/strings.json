@@ -30,7 +30,8 @@
           "expose_setpoint_numbers": "Expose legacy setpoint numbers (diagnostic)",
           "temperature_scale": "Temperature scale (0 = \u00b0C, 1 = \u00b0F)",
           "base_url": "Base URL",
-          "filter_pump_speeds": "Filter pump type (single / two / three speed)"
+          "filter_pump_speeds": "Filter pump type (single / two / three speed)",
+          "heat_spa_only": "Heat the spa only (switch to Spa and start spa jets before heating; never heat the pool)"
         }
       }
     }

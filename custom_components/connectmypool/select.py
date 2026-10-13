@@ -24,6 +24,9 @@ from .const import (
     ACTION_SET_HEAT_COOL,
     CONF_FILTER_PUMP_SPEEDS,
     DEFAULT_FILTER_PUMP_SPEEDS,
+    CONF_HEAT_SPA_ONLY,
+    DEFAULT_HEAT_SPA_ONLY,
+    ACTION_SET_HEATER_MODE,
 )
 from .cycle import (
     SIMPLE_CHANNEL_CYCLE,
@@ -87,8 +90,11 @@ async def async_setup_entry(hass, entry, async_add_entities):
     entities: list[SelectEntity] = []
 
     # Pool/Spa and Heat/Cool selectors if enabled
+    heat_spa_only = bool(
+        entry.options.get(CONF_HEAT_SPA_ONLY, entry.data.get(CONF_HEAT_SPA_ONLY, DEFAULT_HEAT_SPA_ONLY))
+    )
     if cfg.get("pool_spa_selection_enabled"):
-        entities.append(PoolSpaSelect(coordinator, api, wait_for_execution))
+        entities.append(PoolSpaSelect(coordinator, api, wait_for_execution, heat_spa_only))
     if cfg.get("heat_cool_selection_enabled"):
         entities.append(HeatCoolSelect(coordinator, api, wait_for_execution))
 
@@ -168,8 +174,9 @@ class _BaseSelect(ConnectMyPoolEntity, SelectEntity):
 class PoolSpaSelect(_BaseSelect):
     _attr_options = list(POOL_SPA.values())
 
-    def __init__(self, coordinator, api, wait_for_execution) -> None:
+    def __init__(self, coordinator, api, wait_for_execution, heat_spa_only: bool = False) -> None:
         super().__init__(coordinator, api, wait_for_execution, "Pool/Spa Selection", "pool_spa_selection")
+        self._heat_spa_only = bool(heat_spa_only)
 
     @property
     def current_option(self) -> str | None:
@@ -185,6 +192,16 @@ class PoolSpaSelect(_BaseSelect):
         desired = next((k for k, v in POOL_SPA.items() if v == option), None)
         if desired is None:
             raise HomeAssistantError(f"Unsupported option: {option}")
+        if desired == 1 and self._heat_spa_only:
+            # Heat-spa-only: turn any running heater off before switching to Pool.
+            for h in (self.data.get("heaters") or []):
+                try:
+                    if int(h.get("mode")) == 1:
+                        await self._do_action(
+                            ACTION_SET_HEATER_MODE, device_number=int(h["heater_number"]), value="0"
+                        )
+                except (TypeError, ValueError, KeyError):
+                    continue
         await self._do_action(ACTION_SET_POOL_SPA, value=str(desired))
 
 
