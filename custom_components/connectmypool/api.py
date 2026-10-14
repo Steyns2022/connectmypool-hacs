@@ -89,13 +89,13 @@ class ConnectMyPoolApi:
     def _mark_fast_poll(self, seconds: int = 300) -> None:
         self._fast_poll_until = time.monotonic() + max(0, int(seconds))
 
-    async def _post(self, path: str, json_data: dict[str, Any]) -> dict[str, Any]:
+    async def _post(self, path: str, json_data: dict[str, Any], *, timeout: int = 30) -> dict[str, Any]:
         url = f"{self._base_url}{path}"
         try:
             async with self._session.post(
                 url,
                 json=json_data,
-                timeout=aiohttp.ClientTimeout(total=30),
+                timeout=aiohttp.ClientTimeout(total=timeout),
                 headers={"Accept": "application/json"},
             ) as resp:
                 resp.raise_for_status()
@@ -178,20 +178,26 @@ class ConnectMyPoolApi:
     ) -> dict[str, Any]:
         # Serialize actions; it reduces "UI flip-flop" and avoids racing refreshes.
         async with self._action_lock:
-            payload = await self._post(
-                "/api/poolaction",
-                {
-                    "pool_api_code": pool_api_code,
-                    "action_code": int(action_code),
-                    "device_number": int(device_number),
-                    "value": str(value),
-                    "temperature_scale": int(temperature_scale),
-                    "wait_for_execution": bool(wait_for_execution),
-                },
-            )
-
-            # After any action, fast polling is allowed for ~5 minutes (per guide).
-            self._mark_fast_poll(300)
+            try:
+                payload = await self._post(
+                    "/api/poolaction",
+                    {
+                        "pool_api_code": pool_api_code,
+                        "action_code": int(action_code),
+                        "device_number": int(device_number),
+                        "value": str(value),
+                        "temperature_scale": int(temperature_scale),
+                        "wait_for_execution": bool(wait_for_execution),
+                    },
+                    # With wait_for_execution the cloud holds the reply until the
+                    # pool has executed the instruction, which can exceed 30 s.
+                    timeout=90 if wait_for_execution else 30,
+                )
+            finally:
+                # After an instruction reaches the cloud, calls are not throttled
+                # for ~5 minutes (per guide).  Mark it even if our request timed
+                # out, so the follow-up status check isn't served from cache.
+                self._mark_fast_poll(300)
             return payload
 
     async def pool_action_status(self, pool_api_code: str, action_number: int) -> dict[str, Any]:

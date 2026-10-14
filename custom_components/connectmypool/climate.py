@@ -303,7 +303,12 @@ class ConnectMyPoolHeaterClimate(ConnectMyPoolEntity, ClimateEntity):
             self._set_stage("Switching to Spa")
             await self.coordinator.async_refresh()
             if self._pool_or_spa() != 0:
-                await self._do_action(ACTION_SET_POOL_SPA, value="0")
+                try:
+                    await self._do_action(ACTION_SET_POOL_SPA, value="0")
+                except HomeAssistantError as err:
+                    # A slow cloud reply doesn't mean the switch failed; the
+                    # configuration check below confirms Spa mode either way.
+                    _LOGGER.warning("Switch to Spa: %s; checking status", err)
             await asyncio.sleep(SPA_HEAT_SETTLE_SECONDS)
 
             self._set_stage("Checking configuration")
@@ -332,14 +337,50 @@ class ConnectMyPoolHeaterClimate(ConnectMyPoolEntity, ClimateEntity):
         finally:
             self._set_stage(None)
 
+    def _favourite_applied(self, num: int) -> bool:
+        try:
+            if int(self.data.get("active_favourite")) == num:
+                return True
+        except (TypeError, ValueError):
+            pass
+        # Fallback: All Auto leaves every channel in Auto.
+        modes = [c.get("mode") for c in (self.data.get("channels") or [])]
+        return bool(modes) and all(str(m) == "1" for m in modes)
+
+    async def _confirmed_action(
+        self, label: str, action_code: int, *, value: str, applied, device_number: int | None = None
+    ) -> bool:
+        """Send an action and confirm it from fresh status; retry once.
+
+        A timeout or cloud error doesn't abort: the pool often executes the
+        instruction even when the reply is slow, so the status decides.
+        """
+        for attempt in (1, 2):
+            try:
+                await self._do_action(action_code, value=value, device_number=device_number)
+            except HomeAssistantError as err:
+                _LOGGER.warning("%s: %s (attempt %d); checking status", label, err, attempt)
+            for delay in (0, 5, 10, 15):
+                if delay:
+                    await asyncio.sleep(delay)
+                await self.coordinator.async_refresh()
+                if applied():
+                    return True
+        return False
+
     async def _stop_spa_sequence(self) -> None:
         """After the heater is off: cool down with flow, then Pool, then All Auto."""
+        self._last_sequence_error = None
         try:
             self._set_stage(f"Cooling down (heater off, {SPA_COOLDOWN_SECONDS // 60} min)")
             await asyncio.sleep(SPA_COOLDOWN_SECONDS)
 
             self._set_stage("Returning to Pool")
-            await self._do_action(ACTION_SET_POOL_SPA, value="1")
+            if not await self._confirmed_action(
+                "Return to Pool", ACTION_SET_POOL_SPA, value="1",
+                applied=lambda: self._pool_or_spa() == 1,
+            ):
+                raise HomeAssistantError("the controller didn't confirm Pool mode")
 
             fav = next(
                 (
@@ -352,8 +393,12 @@ class ConnectMyPoolHeaterClimate(ConnectMyPoolEntity, ClimateEntity):
                 self._set_stage("Setting All Auto")
                 num = int(fav["favourite_number"])
                 # The guide lists the favourite under device_number; some clients
-                # send it as the value.  Send both.
-                await self._do_action(ACTION_SET_ACTIVE_FAVOURITE, value=str(num), device_number=num)
+                # send it as the value.  Send both.  Re-sending is harmless.
+                if not await self._confirmed_action(
+                    "All Auto", ACTION_SET_ACTIVE_FAVOURITE, value=str(num), device_number=num,
+                    applied=lambda: self._favourite_applied(num),
+                ):
+                    self._last_sequence_error = "All Auto sent but not confirmed by status; check the controller."
             else:
                 _LOGGER.warning("No '%s' favourite found; skipped", ALL_AUTO_FAVOURITE_NAME)
             self._set_stage(None)
@@ -378,7 +423,11 @@ class ConnectMyPoolHeaterClimate(ConnectMyPoolEntity, ClimateEntity):
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
         if hvac_mode == HVACMode.OFF:
             self._raise_if_busy()
-            await self._do_action(ACTION_SET_HEATER_MODE, value="0")
+            if not await self._confirmed_action(
+                "Heater off", ACTION_SET_HEATER_MODE, value="0",
+                applied=lambda: not self._heater_on(),
+            ):
+                raise HomeAssistantError("The controller didn't confirm the heater is off; check it.")
             # Heat-spa-only: keep water flowing through the hot heater, then go
             # back to Pool and All Auto.  Only when the system is in Spa mode.
             if self._heat_spa_only and self._pool_or_spa() == 0 and self._stop_task is None:
