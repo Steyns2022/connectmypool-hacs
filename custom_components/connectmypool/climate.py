@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any, Optional
 
 from homeassistant.components.climate import ClimateEntity, HVACMode, ClimateEntityFeature
@@ -15,15 +16,25 @@ from .const import (
     ACTION_SET_HEATER_SET_TEMP,
     ACTION_SET_HEAT_COOL,
     ACTION_SET_POOL_SPA,
+    ACTION_SET_ACTIVE_FAVOURITE,
+    ALL_AUTO_FAVOURITE_NAME,
+    CHANNEL_MODES,
     CONF_HEAT_SPA_ONLY,
+    CONF_SPA_HEAT_CONFIG,
     DEFAULT_HEAT_SPA_ONLY,
+    DEFAULT_SPA_HEAT_CONFIG,
     HEATER_MODES,
     HEAT_COOL,
     POOL_SPA,
+    SPA_CONFIG_CHECK_DELAYS,
+    SPA_COOLDOWN_SECONDS,
     SPA_HEAT_SETTLE_SECONDS,
     SPA_JETS_FUNCTION,
 )
 from .entity import ConnectMyPoolEntity
+from .spa_config import SpaConfigError, mismatches, parse_spa_config
+
+_LOGGER = logging.getLogger(__name__)
 
 
 async def async_setup_entry(hass, entry, async_add_entities):
@@ -35,11 +46,16 @@ async def async_setup_entry(hass, entry, async_add_entities):
     heat_spa_only = bool(
         entry.options.get(CONF_HEAT_SPA_ONLY, entry.data.get(CONF_HEAT_SPA_ONLY, DEFAULT_HEAT_SPA_ONLY))
     )
+    spa_heat_config = str(
+        entry.options.get(CONF_SPA_HEAT_CONFIG, entry.data.get(CONF_SPA_HEAT_CONFIG, DEFAULT_SPA_HEAT_CONFIG))
+    )
 
     entities: list[ClimateEntity] = []
     for h in (cfg.get("heaters") or []):
         entities.append(
-            ConnectMyPoolHeaterClimate(coordinator, api, wait_for_execution, cfg, h, heat_spa_only)
+            ConnectMyPoolHeaterClimate(
+                coordinator, api, wait_for_execution, cfg, h, heat_spa_only, spa_heat_config
+            )
         )
     async_add_entities(entities)
 
@@ -56,6 +72,7 @@ class ConnectMyPoolHeaterClimate(ConnectMyPoolEntity, ClimateEntity):
         cfg: dict[str, Any],
         heater_cfg: dict[str, Any],
         heat_spa_only: bool = False,
+        spa_heat_config: str = "",
     ) -> None:
         self._api = api
         self._wait = bool(wait_for_execution)
@@ -85,6 +102,30 @@ class ConnectMyPoolHeaterClimate(ConnectMyPoolEntity, ClimateEntity):
             except (TypeError, ValueError, KeyError):
                 continue
         self._heat_lock = asyncio.Lock()
+
+        # Channel modes required before the heater may start (heat_spa_only).
+        channels = cfg.get("channels") or []
+        self._channel_names = {}
+        for ch in channels:
+            try:
+                self._channel_names[int(ch["channel_number"])] = str(ch.get("name") or f"Channel {ch['channel_number']}")
+            except (KeyError, TypeError, ValueError):
+                continue
+        self._spa_config_error: str | None = None
+        try:
+            self._spa_target = parse_spa_config(spa_heat_config, channels)
+        except SpaConfigError as err:
+            self._spa_config_error = str(err)
+            self._spa_target = {}
+            _LOGGER.error("Spa heating configuration ignored: %s", err)
+        if not self._spa_target and self._spa_jets_channel is not None:
+            self._spa_target = {self._spa_jets_channel: 2}  # at least spa jets On (flow)
+
+        # Progress of the running spa start/stop sequence, shown as an attribute
+        # so dashboards can show a busy state and avoid repeated taps.
+        self._sequence_stage: str | None = None
+        self._last_sequence_error: str | None = None
+        self._stop_task: asyncio.Task | None = None
 
     def _unit(self) -> str:
         return UnitOfTemperature.CELSIUS if int(self.coordinator.temperature_scale) == 0 else UnitOfTemperature.FAHRENHEIT
@@ -160,12 +201,12 @@ class ConnectMyPoolHeaterClimate(ConnectMyPoolEntity, ClimateEntity):
             hc = 1
         return HVACMode.HEAT if hc == 1 else HVACMode.COOL
 
-    async def _do_action(self, action_code: int, *, value: str = "") -> None:
+    async def _do_action(self, action_code: int, *, value: str = "", device_number: int | None = None) -> None:
         try:
             await self._api.pool_action(
                 pool_api_code=self.coordinator.pool_api_code,
                 action_code=action_code,
-                device_number=self._heater_number,
+                device_number=self._heater_number if device_number is None else device_number,
                 value=value,
                 temperature_scale=self.coordinator.temperature_scale,
                 wait_for_execution=self._wait,
@@ -192,79 +233,165 @@ class ConnectMyPoolHeaterClimate(ConnectMyPoolEntity, ClimateEntity):
         except (TypeError, ValueError):
             return False
 
-    def _spa_jets_mode(self) -> int | None:
-        for c in (self.data.get("channels") or []):
-            try:
-                if int(c.get("channel_number")) == self._spa_jets_channel:
-                    return int(c.get("mode"))
-            except (TypeError, ValueError):
-                return None
-        return None
+    def _set_stage(self, stage: str | None) -> None:
+        self._sequence_stage = stage
+        if self.hass is not None:
+            self.async_write_ha_state()
+
+    def _raise_if_busy(self) -> None:
+        if self._heat_lock.locked():
+            raise HomeAssistantError(
+                f"Spa heating sequence in progress ({self._sequence_stage or 'starting'}); please wait."
+            )
+
+    def _cancel_stop_sequence(self) -> None:
+        if self._stop_task is not None and not self._stop_task.done():
+            self._stop_task.cancel()
+        self._stop_task = None
+
+    def _describe(self, wrong: dict[int, int | None]) -> str:
+        return ", ".join(
+            f"{self._channel_names.get(n, n)} is {CHANNEL_MODES.get(m, 'unknown') if m is not None else 'unknown'}"
+            f" (needs {CHANNEL_MODES[self._spa_target[n]]})"
+            for n, m in wrong.items()
+        )
+
+    async def _wait_for_spa_config(self) -> dict[int, int | None]:
+        """Read fresh status until Spa mode and the target channel modes show.
+
+        Returns the remaining mismatches (empty when all match).  Raises if the
+        controller never reports Spa mode.
+        """
+        wrong: dict[int, int | None] = {}
+        for delay in SPA_CONFIG_CHECK_DELAYS:
+            if delay:
+                await asyncio.sleep(delay)
+            await self.coordinator.async_refresh()
+            wrong = mismatches(self._spa_target, self.data.get("channels") or [])
+            if self._pool_or_spa() == 0 and not wrong:
+                return {}
+        if self._pool_or_spa() != 0:
+            raise HomeAssistantError("The controller still reports Pool mode; heater not started.")
+        return wrong
+
+    async def _set_channel_mode(self, channel: int, mode: int) -> None:
+        """Change a channel through its own select (reuses its paced cycling)."""
+        entity_id = er.async_get(self.hass).async_get_entity_id(
+            "select", DOMAIN, f"{self._pool_id}_channel_{channel}_mode"
+        )
+        if entity_id is None:
+            raise HomeAssistantError(
+                f"No control for {self._channel_names.get(channel, channel)}; heater not started."
+            )
+        await self.hass.services.async_call(
+            "select",
+            "select_option",
+            {"entity_id": entity_id, "option": CHANNEL_MODES[mode]},
+            blocking=True,
+        )
+
+    async def _start_spa_heating(self, hvac_mode: HVACMode) -> None:
+        """Spa mode -> settle -> check (fix) channel configuration -> heater on.
+
+        The heater only fires with water flowing through it, so it is never
+        started unless the controller reports Spa mode and every configured
+        channel (e.g. Filter Pump On, Spa Jets On, Blower On) in its mode.
+        """
+        self._cancel_stop_sequence()
+        self._last_sequence_error = None
+        try:
+            self._set_stage("Switching to Spa")
+            await self.coordinator.async_refresh()
+            if self._pool_or_spa() != 0:
+                await self._do_action(ACTION_SET_POOL_SPA, value="0")
+            await asyncio.sleep(SPA_HEAT_SETTLE_SECONDS)
+
+            self._set_stage("Checking configuration")
+            wrong = await self._wait_for_spa_config()
+            if wrong:
+                for channel, _mode in wrong.items():
+                    target = self._spa_target[channel]
+                    self._set_stage(
+                        f"Fixing: {self._channel_names.get(channel, channel)} \u2192 {CHANNEL_MODES[target]}"
+                    )
+                    await self._set_channel_mode(channel, target)
+                self._set_stage("Checking configuration")
+                wrong = await self._wait_for_spa_config()
+                if wrong:
+                    raise HomeAssistantError(
+                        f"Spa configuration not reached ({self._describe(wrong)}); heater not started."
+                    )
+
+            self._set_stage("Starting heater")
+            if self._heat_cool_enabled:
+                await self._do_action(ACTION_SET_HEAT_COOL, value="1" if hvac_mode == HVACMode.HEAT else "0")
+            await self._do_action(ACTION_SET_HEATER_MODE, value="1")
+        except HomeAssistantError as err:
+            self._last_sequence_error = str(err)
+            raise
+        finally:
+            self._set_stage(None)
+
+    async def _stop_spa_sequence(self) -> None:
+        """After the heater is off: cool down with flow, then Pool, then All Auto."""
+        try:
+            self._set_stage(f"Cooling down (heater off, {SPA_COOLDOWN_SECONDS // 60} min)")
+            await asyncio.sleep(SPA_COOLDOWN_SECONDS)
+
+            self._set_stage("Returning to Pool")
+            await self._do_action(ACTION_SET_POOL_SPA, value="1")
+
+            fav = next(
+                (
+                    f for f in (self._cfg.get("favourites") or [])
+                    if str(f.get("name", "")).strip().lower() == ALL_AUTO_FAVOURITE_NAME.lower()
+                ),
+                None,
+            )
+            if fav is not None:
+                self._set_stage("Setting All Auto")
+                num = int(fav["favourite_number"])
+                # The guide lists the favourite under device_number; some clients
+                # send it as the value.  Send both.
+                await self._do_action(ACTION_SET_ACTIVE_FAVOURITE, value=str(num), device_number=num)
+            else:
+                _LOGGER.warning("No '%s' favourite found; skipped", ALL_AUTO_FAVOURITE_NAME)
+            self._set_stage(None)
+        except asyncio.CancelledError:
+            # Cancelled by a new Heat request, which now owns the stage.
+            raise
+        except Exception as err:  # noqa: BLE001
+            self._last_sequence_error = f"Stop sequence failed: {err}"
+            _LOGGER.error("Spa stop sequence failed: %s", err)
+            self._set_stage(None)
 
     async def async_set_preset_mode(self, preset_mode: str) -> None:
         desired = next((k for k, v in POOL_SPA.items() if v == preset_mode), None)
         if desired is None or not self._pool_spa_enabled:
             raise HomeAssistantError(f"Unsupported preset: {preset_mode}")
+        self._raise_if_busy()
         if desired == 1 and self._heat_spa_only and self._heater_on():
             # Never leave the heater running into Pool mode.
             await self._do_action(ACTION_SET_HEATER_MODE, value="0")
         await self._do_action(ACTION_SET_POOL_SPA, value=str(desired))
 
-    async def _prepare_spa_for_heating(self) -> None:
-        """Spa mode, then spa jets On, then settle, before the heater starts.
-
-        The heater needs water flowing through it (spa jets running) before it
-        can fire, hence the settle delay and the final flow check.
-        """
-        await self.coordinator.async_refresh()
-        changed = False
-
-        if self._pool_or_spa() != 0:
-            await self._do_action(ACTION_SET_POOL_SPA, value="0")
-            changed = True
-
-        if self._spa_jets_channel is not None and self._spa_jets_mode() != 2:
-            # Use the jets' own select so its paced, verified cycling is reused.
-            ent_reg = er.async_get(self.hass)
-            jets_entity = ent_reg.async_get_entity_id(
-                "select", DOMAIN, f"{self._pool_id}_channel_{self._spa_jets_channel}_mode"
-            )
-            if jets_entity is None:
-                raise HomeAssistantError("Spa jets control not found; heater not started.")
-            await self.hass.services.async_call(
-                "select",
-                "select_option",
-                {"entity_id": jets_entity, "option": "On"},
-                blocking=True,
-            )
-            changed = True
-
-        if changed:
-            await asyncio.sleep(SPA_HEAT_SETTLE_SECONDS)
-
-        # Safety: the heater only fires with water flowing through it, so never
-        # start it unless the controller reports Spa mode and spa jets On.
-        await self.coordinator.async_refresh()
-        if self._pool_or_spa() != 0:
-            raise HomeAssistantError(
-                "Pool/Spa still reports Pool; heater not started. Try again in a minute."
-            )
-        if self._spa_jets_channel is not None and self._spa_jets_mode() != 2:
-            raise HomeAssistantError(
-                "Spa jets don't report On (no flow through the heater); heater not started."
-            )
-
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
         if hvac_mode == HVACMode.OFF:
+            self._raise_if_busy()
             await self._do_action(ACTION_SET_HEATER_MODE, value="0")
+            # Heat-spa-only: keep water flowing through the hot heater, then go
+            # back to Pool and All Auto.  Only when the system is in Spa mode.
+            if self._heat_spa_only and self._pool_or_spa() == 0 and self._stop_task is None:
+                self._stop_task = self.hass.async_create_background_task(
+                    self._stop_spa_sequence(), "connectmypool_spa_stop"
+                )
+                self._stop_task.add_done_callback(lambda _t: setattr(self, "_stop_task", None))
             return
 
         if self._heat_spa_only and hvac_mode in (HVACMode.HEAT, HVACMode.COOL):
+            self._raise_if_busy()
             async with self._heat_lock:
-                await self._prepare_spa_for_heating()
-                if self._heat_cool_enabled:
-                    await self._do_action(ACTION_SET_HEAT_COOL, value="1" if hvac_mode == HVACMode.HEAT else "0")
-                await self._do_action(ACTION_SET_HEATER_MODE, value="1")
+                await self._start_spa_heating(hvac_mode)
             return
 
         if hvac_mode == HVACMode.HEAT:
@@ -300,6 +427,14 @@ class ConnectMyPoolHeaterClimate(ConnectMyPoolEntity, ClimateEntity):
         return {
             "heater_number": self._heater_number,
             "heat_spa_only": self._heat_spa_only,
+            "spa_sequence": self._sequence_stage,
+            "spa_sequence_busy": self._sequence_stage is not None,
+            "spa_sequence_last_error": self._last_sequence_error,
+            "spa_heat_config": {
+                self._channel_names.get(n, str(n)): CHANNEL_MODES.get(m, str(m))
+                for n, m in self._spa_target.items()
+            },
+            "spa_heat_config_error": self._spa_config_error,
             "heater_mode_raw": None if self._find_heater() is None else self._find_heater().get("mode"),
             "pool_spa_selection": POOL_SPA.get(self._pool_or_spa(), str(self._pool_or_spa())),
             "heat_cool_selection": HEAT_COOL.get(int(self.data.get("heat_cool_selection", 1)), str(self.data.get("heat_cool_selection"))),

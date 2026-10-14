@@ -12,6 +12,7 @@ CONF_EXPOSE_CHANNEL_SWITCHES = "expose_channel_switches"
 CONF_EXPOSE_SETPOINT_NUMBERS = "expose_setpoint_numbers"
 CONF_FILTER_PUMP_SPEEDS = "filter_pump_speeds"
 CONF_HEAT_SPA_ONLY = "heat_spa_only"
+CONF_SPA_HEAT_CONFIG = "spa_heat_config"
 
 # Defaults
 DEFAULT_BASE_URL = "https://www.connectmypool.com.au"
@@ -24,9 +25,16 @@ FILTER_PUMP_SPEED_OPTIONS = ["single", "two", "three"]
 DEFAULT_FILTER_PUMP_SPEEDS = "two"  # pre-option behaviour (Viron two-speed)
 DEFAULT_HEAT_SPA_ONLY = False
 
-# Heat-spa-only sequence: Spa mode -> spa jets On -> settle -> heater on.
+DEFAULT_SPA_HEAT_CONFIG = ""  # empty: require only the spa jets On
+
+# Heat-spa-only sequences.
+# Start: Spa mode -> settle -> check (and fix) the channel configuration -> heater on.
+# Stop:  heater off -> cool-down with water still flowing -> Pool mode -> All Auto.
 SPA_JETS_FUNCTION = 12
-SPA_HEAT_SETTLE_SECONDS = 15
+SPA_HEAT_SETTLE_SECONDS = 5
+SPA_CONFIG_CHECK_DELAYS = (0, 5, 5, 10, 10, 10, 10, 10)  # ~60 s of fresh reads
+SPA_COOLDOWN_SECONDS = 300
+ALL_AUTO_FAVOURITE_NAME = "All Auto"
 
 # Platforms
 PLATFORMS: list[str] = [

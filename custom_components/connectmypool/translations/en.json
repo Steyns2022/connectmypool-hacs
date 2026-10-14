@@ -31,7 +31,8 @@
           "temperature_scale": "Temperature scale (0 = \u00b0C, 1 = \u00b0F)",
           "base_url": "Base URL",
           "filter_pump_speeds": "Filter pump type (single / two / three speed)",
-          "heat_spa_only": "Heat the spa only (switch to Spa and start spa jets before heating; never heat the pool)"
+          "heat_spa_only": "Heat the spa only (switch to Spa, check the channel configuration, never heat the pool; heater off cools down 5 min, then Pool + All Auto)",
+          "spa_heat_config": "Spa heating configuration, e.g. Filter Pump=On, Overflow=Off, Spa Jets=On, Blower=On, Tank Light=Off (empty = Spa Jets On)"
         }
       }
     }
