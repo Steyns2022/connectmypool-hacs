@@ -259,7 +259,12 @@ class ActiveFavouriteSelect(_BaseSelect):
         desired_num = next((k for k, v in self._by_number.items() if v == option), None)
         if desired_num is None:
             raise HomeAssistantError(f"Unknown favourite: {option}")
-        await self._do_action(ACTION_SET_ACTIVE_FAVOURITE, value=str(desired_num))
+        # The controller takes the favourite from device_number (per the guide);
+        # sending it only as the value activated favourite 0 ("Pool") whatever
+        # was chosen.  Send both.
+        await self._do_action(
+            ACTION_SET_ACTIVE_FAVOURITE, device_number=desired_num, value=str(desired_num)
+        )
 
 
 class ChannelModeSelect(_BaseSelect):
