@@ -78,6 +78,8 @@ class _BaseSetpointNumber(ConnectMyPoolEntity, NumberEntity):
             await self.coordinator.async_request_refresh()
         except ConnectMyPoolError as err:
             raise HomeAssistantError(str(err)) from err
+        finally:
+            self.coordinator.async_follow_up(key=self.unique_id)
 
 
 class HeaterSetpointNumber(_BaseSetpointNumber):

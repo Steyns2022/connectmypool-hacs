@@ -86,7 +86,23 @@ class LightingZoneLight(ConnectMyPoolEntity, LightEntity):
                 return name
         return str(col_num)
 
+    def _mode(self) -> int | None:
+        try:
+            return int((self._find_lz() or {}).get("mode"))
+        except (TypeError, ValueError):
+            return None
+
+    def _color(self) -> int | None:
+        try:
+            return int((self._find_lz() or {}).get("color"))
+        except (TypeError, ValueError):
+            return None
+
     async def _do_action(self, action_code: int, *, value: str = "") -> None:
+        if action_code == ACTION_SET_LIGHT_MODE:
+            confirmed = lambda: self._mode() == int(value)  # noqa: E731
+        else:
+            confirmed = lambda: self._color() == int(value)  # noqa: E731
         try:
             await self._api.pool_action(
                 pool_api_code=self.coordinator.pool_api_code,
@@ -100,6 +116,9 @@ class LightingZoneLight(ConnectMyPoolEntity, LightEntity):
             await self.coordinator.async_request_refresh()
         except ConnectMyPoolError as err:
             raise HomeAssistantError(str(err)) from err
+        finally:
+            # Also after an error: a slow reply often still executes.
+            self.coordinator.async_follow_up(confirmed, key=(self.unique_id, action_code))
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         # Turn on sets mode to "On" (2). If you want Auto, use the corresponding Mode select entity.

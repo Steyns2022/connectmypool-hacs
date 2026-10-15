@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Optional
+import time
+from typing import Any, Callable, Optional
 
 from homeassistant.components.select import SelectEntity
 from homeassistant.exceptions import HomeAssistantError
@@ -54,6 +55,13 @@ _VERIFY_DELAYS: tuple[float, ...] = (1.0, 2.0, 3.0, 4.0, 5.0, 5.0, 5.0, 5.0)
 # cycle within a few seconds, but status lags, so pace by time (not by reading
 # status) to guarantee each press is applied before the next is sent.
 _INTER_STEP_SETTLE = 12.0
+
+
+def _as_int(val: Any) -> int | None:
+    try:
+        return int(val)
+    except (TypeError, ValueError):
+        return None
 
 
 def _is_filter_pump_channel(ch: dict[str, Any]) -> bool:
@@ -155,7 +163,15 @@ class _BaseSelect(ConnectMyPoolEntity, SelectEntity):
         self._api = api
         self._wait = bool(wait_for_execution)
 
-    async def _do_action(self, action_code: int, device_number: int = 0, value: str = "") -> None:
+    async def _do_action(
+        self,
+        action_code: int,
+        device_number: int = 0,
+        value: str = "",
+        *,
+        confirmed: Callable[[], bool] | None = None,
+    ) -> None:
+        """Send an action, then follow up with status reads until ``confirmed()``."""
         try:
             await self._api.pool_action(
                 pool_api_code=self.coordinator.pool_api_code,
@@ -169,6 +185,9 @@ class _BaseSelect(ConnectMyPoolEntity, SelectEntity):
             await self.coordinator.async_request_refresh()
         except ConnectMyPoolError as err:
             raise HomeAssistantError(str(err)) from err
+        finally:
+            # Also after an error: a slow reply often still executes.
+            self.coordinator.async_follow_up(confirmed, key=(self.unique_id, action_code, device_number))
 
 
 class PoolSpaSelect(_BaseSelect):
@@ -197,12 +216,23 @@ class PoolSpaSelect(_BaseSelect):
             for h in (self.data.get("heaters") or []):
                 try:
                     if int(h.get("mode")) == 1:
+                        hn = int(h["heater_number"])
                         await self._do_action(
-                            ACTION_SET_HEATER_MODE, device_number=int(h["heater_number"]), value="0"
+                            ACTION_SET_HEATER_MODE, device_number=hn, value="0",
+                            confirmed=lambda hn=hn: self._heater_mode(hn) == 0,
                         )
                 except (TypeError, ValueError, KeyError):
                     continue
-        await self._do_action(ACTION_SET_POOL_SPA, value=str(desired))
+        await self._do_action(
+            ACTION_SET_POOL_SPA, value=str(desired),
+            confirmed=lambda: _as_int(self.data.get("pool_spa_selection")) == desired,
+        )
+
+    def _heater_mode(self, heater_number: int) -> int | None:
+        for h in (self.data.get("heaters") or []):
+            if _as_int(h.get("heater_number")) == heater_number:
+                return _as_int(h.get("mode"))
+        return None
 
 
 class HeatCoolSelect(_BaseSelect):
@@ -225,7 +255,10 @@ class HeatCoolSelect(_BaseSelect):
         desired = next((k for k, v in HEAT_COOL.items() if v == option), None)
         if desired is None:
             raise HomeAssistantError(f"Unsupported option: {option}")
-        await self._do_action(ACTION_SET_HEAT_COOL, value=str(desired))
+        await self._do_action(
+            ACTION_SET_HEAT_COOL, value=str(desired),
+            confirmed=lambda: _as_int(self.data.get("heat_cool_selection")) == desired,
+        )
 
 
 class ActiveFavouriteSelect(_BaseSelect):
@@ -263,7 +296,8 @@ class ActiveFavouriteSelect(_BaseSelect):
         # sending it only as the value activated favourite 0 ("Pool") whatever
         # was chosen.  Send both.
         await self._do_action(
-            ACTION_SET_ACTIVE_FAVOURITE, device_number=desired_num, value=str(desired_num)
+            ACTION_SET_ACTIVE_FAVOURITE, device_number=desired_num, value=str(desired_num),
+            confirmed=lambda: _as_int(self.data.get("active_favourite")) == desired_num,
         )
 
 
@@ -339,6 +373,8 @@ class ChannelModeSelect(_BaseSelect):
                 wait_for_execution=True,
             )
         except ConnectMyPoolError as err:
+            # The step may still execute; let status catch up promptly.
+            self.coordinator.async_follow_up(key=self.unique_id)
             raise HomeAssistantError(str(err)) from err
 
     async def _refresh_and_read(self, delay: float) -> int | None:
@@ -405,6 +441,7 @@ class ChannelModeSelect(_BaseSelect):
             await self._send_cycle()
             if step < total - 1:
                 await asyncio.sleep(_INTER_STEP_SETTLE)
+        last_sent_at = time.monotonic()
 
         # Best-effort confirmation for the UI.  All required cycles have been
         # sent, so never send more; if status has not caught up within the
@@ -415,8 +452,16 @@ class ChannelModeSelect(_BaseSelect):
         else:
             _LOGGER.warning(
                 "%s: '%s' not yet confirmed by status (last saw '%s'); the %d "
-                "cycle action(s) were sent, state will reconcile on the next poll.",
+                "cycle action(s) were sent; following up with status reads.",
                 self._attr_name, self._label(desired), self._label(observed), total,
+            )
+            # Keep re-reading status (timed from the last cycle sent) so the
+            # change shows up as soon as the cloud reports it, instead of on the
+            # next regular poll.  Read-only: never sends more cycles.
+            self.coordinator.async_follow_up(
+                lambda: self._find_mode() == desired,
+                key=self.unique_id,
+                started_at=last_sent_at,
             )
 
     async def async_select_option(self, option: str) -> None:
@@ -481,7 +526,10 @@ class ValveModeSelect(_BaseSelect):
         desired = next((k for k, v in TRI_MODES.items() if v == option), None)
         if desired is None:
             raise HomeAssistantError(f"Unsupported option: {option}")
-        await self._do_action(ACTION_SET_VALVE_MODE, device_number=self._valve_number, value=str(desired))
+        await self._do_action(
+            ACTION_SET_VALVE_MODE, device_number=self._valve_number, value=str(desired),
+            confirmed=lambda: self._find_mode() == desired,
+        )
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -522,7 +570,10 @@ class SolarModeSelect(_BaseSelect):
         desired = next((k for k, v in TRI_MODES.items() if v == option), None)
         if desired is None:
             raise HomeAssistantError(f"Unsupported option: {option}")
-        await self._do_action(ACTION_SET_SOLAR_MODE, device_number=self._solar_number, value=str(desired))
+        await self._do_action(
+            ACTION_SET_SOLAR_MODE, device_number=self._solar_number, value=str(desired),
+            confirmed=lambda: self._find_mode() == desired,
+        )
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -560,7 +611,10 @@ class LightingZoneModeSelect(_BaseSelect):
         desired = next((k for k, v in TRI_MODES.items() if v == option), None)
         if desired is None:
             raise HomeAssistantError(f"Unsupported option: {option}")
-        await self._do_action(ACTION_SET_LIGHT_MODE, device_number=self._lz_number, value=str(desired))
+        await self._do_action(
+            ACTION_SET_LIGHT_MODE, device_number=self._lz_number, value=str(desired),
+            confirmed=lambda: self._find_mode() == desired,
+        )
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:

@@ -49,3 +49,6 @@ class LightingZoneSyncButton(ConnectMyPoolEntity, ButtonEntity):
             await self.coordinator.async_request_refresh()
         except ConnectMyPoolError as err:
             raise HomeAssistantError(str(err)) from err
+        finally:
+            # No status field reflects a sync, so run the full schedule.
+            self.coordinator.async_follow_up(key=self.unique_id)

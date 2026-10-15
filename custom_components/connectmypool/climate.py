@@ -201,6 +201,22 @@ class ConnectMyPoolHeaterClimate(ConnectMyPoolEntity, ClimateEntity):
             hc = 1
         return HVACMode.HEAT if hc == 1 else HVACMode.COOL
 
+    def _action_confirmed(self, action_code: int, value: str):
+        """Status check for the follow-up refresh after an action (None = no check)."""
+        try:
+            want = int(value)
+        except (TypeError, ValueError):
+            return None
+        if action_code == ACTION_SET_HEATER_MODE:
+            return lambda: self._heater_on() == (want == 1)
+        if action_code == ACTION_SET_POOL_SPA:
+            return lambda: self._pool_or_spa() == want
+        if action_code == ACTION_SET_HEAT_COOL:
+            return lambda: str(self.data.get("heat_cool_selection")) == str(want)
+        if action_code == ACTION_SET_ACTIVE_FAVOURITE:
+            return lambda: str(self.data.get("active_favourite")) == str(want)
+        return None
+
     async def _do_action(self, action_code: int, *, value: str = "", device_number: int | None = None) -> None:
         try:
             await self._api.pool_action(
@@ -215,6 +231,12 @@ class ConnectMyPoolHeaterClimate(ConnectMyPoolEntity, ClimateEntity):
             await self.coordinator.async_request_refresh()
         except ConnectMyPoolError as err:
             raise HomeAssistantError(str(err)) from err
+        finally:
+            # Status reads only (never another action), so the spa sequences'
+            # own confirmation steps are unchanged.
+            self.coordinator.async_follow_up(
+                self._action_confirmed(action_code, value), key=(self.unique_id, action_code)
+            )
 
     @property
     def preset_mode(self) -> str | None:

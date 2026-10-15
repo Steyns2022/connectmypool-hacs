@@ -30,6 +30,13 @@ The ConnectMyPool cloud throttles **poolconfig** and **poolstatus** to about **o
 
 This integration is designed around that: default scan interval is 60s, and it uses cached data if the cloud replies with a throttle error.
 
+Because the cloud's status lags the controller, after every command (channel
+mode, favourite, lighting, heater, Pool/Spa, setpoints) the integration re-reads
+status at about **15, 30, 60, 90 and 150 seconds** after the command, stopping
+as soon as the new state is reported. These reads happen only inside the
+~5-minute un-throttled window, and a newer command replaces (does not add to) a
+pending schedule.
+
 ## Install (recommended via HACS)
 
 1. Create a GitHub repo and copy this code into it (or unzip the provided zip and push it).
@@ -66,3 +73,12 @@ In **Settings → Devices & Services → ConnectMyPool → Configure**:
 ## Entity ID prefix helper
 
 This integration includes a service `connectmypool.apply_entity_id_prefix` that can rename the integration's entities in your entity registry to include a prefix (default: `connectmypool_`). Run it once with `dry_run: true` to preview, then again with `dry_run: false` to apply.
+
+
+## Changelog
+
+- **1.0.13** — Faster confirmation after a command: follow-up status reads at
+  ~15/30/60/90/150 s after each action (only inside the post-action
+  un-throttled window), stopping once the target state is reported; a newer
+  command replaces the pending schedule. Channel mode changes still read
+  fresh status before deciding how many cycle steps to send.

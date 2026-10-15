@@ -86,6 +86,11 @@ class ConnectMyPoolApi:
     def _fast_poll_active(self) -> bool:
         return self._fast_poll_until is not None and time.monotonic() < self._fast_poll_until
 
+    @property
+    def fast_poll_active(self) -> bool:
+        """True while the post-action un-throttled window is open."""
+        return self._fast_poll_active()
+
     def _mark_fast_poll(self, seconds: int = 300) -> None:
         self._fast_poll_until = time.monotonic() + max(0, int(seconds))
 

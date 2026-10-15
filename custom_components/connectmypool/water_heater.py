@@ -108,6 +108,8 @@ class ConnectMyPoolSolarWaterHeater(ConnectMyPoolEntity, WaterHeaterEntity):
             await self.coordinator.async_request_refresh()
         except ConnectMyPoolError as err:
             raise HomeAssistantError(str(err)) from err
+        finally:
+            self.coordinator.async_follow_up(key=self.unique_id)
 
     async def async_set_operation_mode(self, operation_mode: str) -> None:
         desired = next((k for k, v in TRI_MODES.items() if v == operation_mode), None)

@@ -174,6 +174,7 @@ def _async_setup_services(hass: HomeAssistant) -> None:
 
         await asyncio.sleep(1.5)
         await coordinator.async_request_refresh()
+        coordinator.async_follow_up()
 
     apply_prefix_schema = vol.Schema(
         {
@@ -299,6 +300,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
         entry_data = hass.data[DOMAIN].pop(entry.entry_id, None)
+        if entry_data and (coordinator := entry_data.get("coordinator")):
+            coordinator.async_cancel_follow_up()
         if entry_data and (unsub := entry_data.get("unsub_options_update_listener")):
             unsub()
     return unload_ok
